@@ -5,7 +5,15 @@ from utils import GraphCreator
 import torch
 from sklearn.preprocessing import MinMaxScaler
 import pickle
+import os
 
+# create folder structure
+os.mkdir("data")
+os.mkdir("feature_importances")
+os.mkdir("logs")
+os.mkdir("data")
+os.mkdir("plots")
+os.mkdir("trained_models")
 
 gc = GraphCreator()
 catmos = pd.read_excel("data/CATMoS.xlsx", 1, header=1)
