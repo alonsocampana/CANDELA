@@ -1,7 +1,7 @@
 # CANDELA
 Code for the publication "Cancer Drug Sensitivity Estimation using Modular Deep Graph Neural Networks"
 
-`run_experiments.sh` contains the driver code for running the pretraining of both tasks and the proposed models:
+`run_experiments.sh` contains the driver code for running the both pretraining tasks and the proposed models:
 - `data_preprocessing.py` contains the code for the data preprocessing for the pretraining and downstream tasks. The data (and pretrained models) can be found in https://zenodo.org/record/8020946
 - `pretrain_features.py` stores the weights of the model trained to predict molecular features
 - `pretrain_toxicity.py` stores the weights of the model trained to predict molecular toxicity
