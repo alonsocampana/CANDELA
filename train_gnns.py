@@ -16,7 +16,6 @@ from torch.utils.data import DataLoader, Dataset
 from torch_geometric.data import Batch
 from torch_geometric.nn import GlobalAttention
 import json
-from GAMMA import eval_metrics2
 
 def train_model(config, k=25):
     MAX_PATIENCE = [10]
@@ -83,6 +82,8 @@ if __name__ == "__main__":
         required=True,
         help="The model to be trained (gamma, gatmann or baseline)")
     parser.add_argument(
+        "--concat", action="store_true", help="Replaces cross-attention by concatenation")
+    parser.add_argument(
         "--blind",
         type=str,
         required=True,
@@ -95,6 +96,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--noregularizer",
         action="store_true", help="Remove Regularization")
+    parser.add_argument(
+        "--notox",
+        action="store_true", help="Remove toxicity pretraining")
     
     parser.add_argument(
         "--fold",
@@ -120,25 +124,44 @@ if __name__ == "__main__":
     else:
         train_suffix = "no_pretraining"
     if args.model == "gamma":
-        from GAMMA import train_epoch, test_epoch, eval_metrics, prepare_dataloaders, get_model
+        from GAMMA import train_epoch, test_epoch, eval_metrics, prepare_dataloaders, get_model, eval_metrics2
         if args.pretrained:
-            from GAMMA import prepare_cross_validation_P as prepare_cross_validation
+            if args.notox:
+                from GAMMA import prepare_cross_validation_P1 as prepare_cross_validation
+            elif args.concat:
+                from GAMMA import prepare_cross_validation_FS as prepare_cross_validation
+            else:
+                from GAMMA import prepare_cross_validation_P1 as prepare_cross_validation
         else:
             from GAMMA import prepare_cross_validation
         with open(f"params/best_params_GAMMA_{train_suffix}_{blind_suffix}_GDSC1.json", "r") as f:
             config = json.load(f)
+            config["pooling"] = "gated"
+        if not args.notox:
+            train_suffix = "pretrained"
+        else:
+            train_suffix = "no_tox"
+        if args.concat:
+            train_suffix += "_concatenation"
         if args.noregularizer:
             config["l2_weight"] = 0.0
             train_suffix += "_noregularizer"
     elif args.model == "gatmann":
-        from GATmann import train_epoch, test_epoch, eval_metrics, prepare_dataloaders, get_model
+        from GATmann import train_epoch, test_epoch, eval_metrics, prepare_dataloaders, get_model, eval_metrics2
         if args.pretrained:
-            from GATmann import prepare_cross_validation_P as prepare_cross_validation
+            if args.notox:
+                from GATmann import prepare_cross_validation_P1 as prepare_cross_validation
+            else:
+                from GATmann import prepare_cross_validation_P as prepare_cross_validation
         else:
             from GATmann import prepare_cross_validation
         with open(f"params/best_params_GATMANN_{train_suffix}_{blind_suffix}_GDSC1.json", "r") as f:
             config = json.load(f)
             config["lr_decay"] = 0.99
+        if not args.notox:
+            train_suffix = "pretrained"
+        else:
+            train_suffix = "no_tox"
     elif args.model == "baseline":
         if args.pretrained:
             raise NotImplementedError
@@ -164,7 +187,6 @@ if __name__ == "__main__":
     else:
         init = args.fold
         end = args.fold + 1
-    config["train_batch"] = 256
-    config["pooling"] = "gated"
+    config ["pooling"] = "gated"
     train_model(config, k=args.k)
     gc.collect()
