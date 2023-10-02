@@ -73,7 +73,6 @@ class GAMMA(nn.Module):
                  pooling="gated",
                  **kwargs):
         super().__init__()
-        #self.bias = nn.Parameter(torch.tensor([0.2]))
         self.gene_encoder = nn.Linear(n_genes, encoded_gene_dim)
         self.w_g = nn.Sequential(nn.ReLU(),
                                 nn.Linear(encoded_gene_dim, embed_dim))
@@ -117,7 +116,7 @@ class GAMMA(nn.Module):
                                p_dropout=p_dropout_fc)
         
         self.global_attention.apply(init_weights)
-        
+                     
     def set_cold(self):
         for p in self.gat_encoder.parameters():
             p.requires_grad=False
@@ -141,6 +140,80 @@ class GAMMA(nn.Module):
             x_int = self.global_attention(node_embeddings + x_gatt, batch)
         return torch.cat([self.fc_drug(x_drug)[:, None], self.fc_line(exp)[:, None], self.fc_interaction(x_int)[:, None]], axis=1).squeeze()
     
+class GAMMAMLP(GAMMA):
+    def __init__(self,
+                 GATmann_encoder,
+                 graph_selfattention,
+                 p_dropout_attn = 0.3577,
+                 p_dropout_fc = 0.30,
+                 embed_dim=1024,
+                 encoded_gene_dim = 512,
+                 hidden_factor_attn = 1,
+                 hidden_factor_drug = 1,
+                 hidden_factor_interaction = 1,
+                 hidden_factor_line = 1,
+                 output_dim=256,
+                 n_genes=2089,
+                 pooling="gated",
+                 **kwargs):
+        super().__init__(GATmann_encoder,
+                 graph_selfattention,
+                 p_dropout_attn = p_dropout_attn,
+                 p_dropout_fc = p_dropout_fc,
+                 embed_dim=embed_dim,
+                 encoded_gene_dim = encoded_gene_dim,
+                 hidden_factor_attn = hidden_factor_attn,
+                 hidden_factor_drug = hidden_factor_drug,
+                 hidden_factor_interaction = hidden_factor_interaction,
+                 hidden_factor_line = hidden_factor_line,
+                 output_dim=output_dim,
+                 n_genes=n_genes,
+                 pooling=pooling)
+        self.fc_interaction = FCBlock(input_dim = output_dim+encoded_gene_dim,
+                               hidden_factor = hidden_factor_interaction,
+                               p_dropout=p_dropout_fc)
+    def forward(self, exp, x, edge_index, edge_attr, batch, *args, **kwargs):
+        exp = self.gene_encoder(exp).squeeze()
+        node_embeddings = self.gat_encoder(x, edge_index, edge_attr)
+        x_drug = self.graph_selfattention(node_embeddings, batch)
+        x_gatt = self.w_g(exp)
+        return torch.cat([self.fc_drug(x_drug)[:, None], self.fc_line(exp)[:, None], self.fc_interaction(torch.cat([x_drug, exp], axis = -1))[:, None]], axis=1).squeeze()    
+
+def get_model_FS(**config):
+    with open("params/optimal_config_GATF.json", "r") as f:
+        config_gatf = json.load(f)
+    with open("params/optimal_config_GATR.json", "r") as f:
+        config_gatr = json.load(f)
+    try:
+        config_gatf["p_dropout_gat"] = config["p_dropout_gat"]
+        config_gatr["p_dropout_attn"] = config["p_dropout_attn"]
+    except KeyError:
+        pass
+    pretrained_GATF = GATF(**config_gatf)
+    encoder = pretrained_GATF.gat_encoder
+    tox_attn = GATR(encoder, **config_gatr)
+    tox_attn.load_state_dict(torch.load("trained_models/GATR_pretrained.pth",  map_location=torch.device("cpu")))
+    model = GAMMAMLP(tox_attn.gat_encoder, tox_attn.global_attention, output_dim = config_gatr["output_dim"], **config)
+    model.set_cold()
+    return model
+
+def get_model_without_tox(**config):
+    with open("params/optimal_config_GATF.json", "r") as f:
+        config_gatf = json.load(f)
+    with open("params/optimal_config_GATR.json", "r") as f:
+        config_gatr = json.load(f)
+    try:
+        config_gatf["p_dropout_gat"] = config["p_dropout_gat"]
+        config_gatr["p_dropout_attn"] = config["p_dropout_attn"]
+    except KeyError:
+        pass
+    pretrained_GATF = GATF(**config_gatf)
+    pretrained_GATF.load_state_dict(torch.load("trained_models/best_GATF.pth",  map_location=torch.device("cpu")))
+    encoder = pretrained_GATF.gat_encoder
+    tox_attn = GATR(encoder, **config_gatr)
+    model = GAMMA(tox_attn.gat_encoder, tox_attn.global_attention, output_dim = config_gatr["output_dim"], **config)
+    model.set_cold()
+    return model
 
 def get_model(**config):
     with open("params/optimal_config_GATF.json", "r") as f:
@@ -196,7 +269,7 @@ def train_epoch(device, loss_fn, train_dataloader, model, optimizer, test_datalo
         preds = model(expression, node_features, edge_index, edge_attr, batch)
         variances = torch.Tensor()
         reg_ = reg(one_out, preds.squeeze())
-        preds = preds[:, 0] + preds[:, 1] + preds[:, 2] + model.bias
+        preds = preds[:, 0] + preds[:, 1] + preds[:, 2]
         mse = loss(target.squeeze(), preds.squeeze())
         loss_ = mse + l2_weight*reg_
         loss_.backward()
@@ -223,7 +296,7 @@ def test_epoch(device, loss_fn, test_dataloader, model, optimizer=None, train_da
             edge_attr = drugs["edge_attr"].float().to(device)
             batch = drugs["batch"].long().to(device)
             preds = model(expression, node_features, edge_index, edge_attr, batch)
-            preds = preds[:, 0] + preds[:, 1] + preds[:, 2] + model.bias
+            preds = preds[:, 0] + preds[:, 1] + preds[:, 2]
             mse = loss(target.squeeze(), preds.squeeze())
             mean_loss = mse.detach().item()
             losses.append(mean_loss)
@@ -248,7 +321,7 @@ def eval_metrics(device, val_dataloader, model, **kwargs):
             edge_attr = drugs["edge_attr"].float().to(device)
             batch = drugs["batch"].long().to(device)
             preds = model(expression, node_features, edge_index, edge_attr, batch)
-            preds = preds[:, 0] + preds[:, 1] + preds[:, 2] + model.bias
+            preds = preds[:, 0] + preds[:, 1] + preds[:, 2]
             preds, target = preds.squeeze(), target.squeeze()
             r = pearson_corrcoef(preds, target).cpu().numpy()
             r2 = r2_score(preds, target).cpu().numpy()
@@ -282,7 +355,7 @@ def eval_metrics2(device, val_dataloader, model, **kwargs):
             edge_attr = drugs["edge_attr"].float().to(device)
             batch = drugs["batch"].long().to(device)
             preds = model(expression, node_features, edge_index, edge_attr, batch)
-            preds = preds[:, 0] + preds[:, 1] + preds[:, 2] + model.bias
+            preds = preds[:, 0] + preds[:, 1] + preds[:, 2]
             preds, target = preds.squeeze(), target.squeeze()
             r.update(preds, target)
             r2.update(preds, target)
@@ -315,34 +388,165 @@ def predict(device, val_dataloader, model, loss_fn = None, optimizer=None, train
             predictions.append(preds.cpu().numpy())
     return np.vstack(predictions)
 
-def predict_mc(device, val_dataloader, model, loss_fn = None, optimizer=None, train_dataloader = None, test_dataloader = None, samples = 200, **kwargs):
-    model.train()
-    predictions_1 = []
-    predictions_2 = []
-    predictions_3 = []
-    with torch.no_grad():
-        for x, data in enumerate(val_dataloader):
-            expression, drugs, target, _ = data
-            expression,target = expression.float().to(device),\
-                    target.float().to(device)
-            expression = expression.unsqueeze(1)
-            node_features = drugs["x"].float().to(device)
-            edge_index = drugs["edge_index"].long().to(device)
-            edge_attr = drugs["edge_attr"].float().to(device)
-            batch = drugs["batch"].long().to(device)
-            temp_preds1 = []
-            temp_preds2 = []
-            temp_preds3 = []
-            for i in range(samples):
-                preds = model(expression, node_features, edge_index, edge_attr, batch)
-                preds = preds.cpu().numpy().squeeze()
-                temp_preds1.append(preds[:,0][:,None])
-                temp_preds2.append(preds[:,1][:,None])
-                temp_preds3.append(preds[:,2][:,None])
-            predictions_1.append(np.concatenate(temp_preds1, axis=1))
-            predictions_2.append(np.concatenate(temp_preds2, axis=1))
-            predictions_3.append(np.concatenate(temp_preds3, axis=1))
-    return np.vstack(predictions_1), np.vstack(predictions_2), np.vstack(predictions_3)
+def prepare_cross_validation_FS(config=None, dataset = "GDSC1", k=16, no_val = False, all_genes=False, use_slopes = False, corruption = None, **kwargs):
+    partitions = {}
+    try:
+        use_log_scale = config["use_log_scale"]
+    except (KeyError, TypeError):
+        use_log_scale = True
+    try:
+        use_split = config["use_split"]
+    except (KeyError, TypeError):
+        use_split = "blind_chems"
+    if dataset == "GDSC1":
+        if all_genes:
+            n_genes = 17419
+            prepare_dataloaders_fn = prepare_dataloaders_allgenes
+        else:
+            n_genes = 2089
+            prepare_dataloaders_fn = prepare_dataloaders
+        
+        if corruption is not None:
+            prepare_dataloaders_fn = prepare_dataloaders_corrupted
+        if use_slopes:
+            data = pd.read_csv("data/data_slopes.csv", index_col=0)
+        elif use_log_scale:
+            data = pd.read_csv("data/ic50_processed_windex.csv")
+        else:
+            data = pd.read_csv("data/ic50_processed_nolog.csv")
+        if use_split == "blind_lines":
+            partition_col = "COSMIC_ID"
+        elif use_split == "blind_chems":
+            partition_col = "DRUG_NAME"
+    elif dataset == "PRISM":
+        n_genes = 2055
+        if use_log_scale:
+            data = pd.read_csv("data/prism_screening_processed.csv", index_col=0)
+        else:
+            raise NotImplementedError
+        if use_split == "blind_lines":
+            partition_col = "depmap_id"
+        elif use_split == "blind_chems":
+            partition_col = "name"
+        prepare_dataloaders_fn = prepare_dataloaders_prism
+    else:
+        raise NotImplementedError
+    if use_split in ["blind_lines", "blind_chems"]:
+        kf = KFoldGen(data, partition_col, k=k)
+    elif use_split == "lenient":
+        kf = KFoldLenient(data, partition_col, k=k)
+    else:
+        raise NotImplementedError
+    if config is not None:
+        config["n_genes"] = n_genes
+        learning_rate = config["learning_rate"]
+        betas =  (config["beta_1"], config["beta_2"])
+        weight_decay = config["weight_decay"]
+        train_batch = config["train_batch"]
+        for i in range(k):
+            train_dataloader, test_dataloader, val_dataloader = prepare_dataloaders_fn(train_batch = train_batch, no_val=no_val,**kf[i])
+            partitions[i] = {"model":get_model_FS(**config),
+                            "train_dataloader":train_dataloader,
+                            "test_dataloader":test_dataloader,
+                            "val_dataloader":val_dataloader}
+            partitions[i]["optimizer"] = torch.optim.Adam(partitions[i]["model"].parameters(),
+                                                          lr=learning_rate,
+                                                         betas = betas,
+                                                         weight_decay = weight_decay)
+            partitions[i]["model"].set_cold()
+            partitions[i]["scheduler"] = torch.optim.lr_scheduler.ExponentialLR(partitions[i]["optimizer"], gamma=config["lr_decay"])
+    else:
+        config = {}
+        config["n_genes"] = n_genes
+        for i in range(k):
+            train_dataloader, test_dataloader, val_dataloader = prepare_dataloaders_fn(no_val=no_val,**kf[i])
+            partitions[i] = {"model":get_model_FS(**config),
+                            "train_dataloader":train_dataloader,
+                            "test_dataloader":test_dataloader,
+                            "val_dataloader":val_dataloader}
+            partitions[i]["optimizer"] = torch.optim.Adam(partitions[i]["model"].parameters())
+            partitions[i]["scheduler"] = torch.optim.lr_scheduler.ExponentialLR(partitions[i]["optimizer"], gamma=0.99)
+    return partitions
+
+def prepare_cross_validation_P1(config=None, dataset = "GDSC1", k=16, no_val = False, all_genes=False, use_slopes = False, corruption = None, **kwargs):
+    partitions = {}
+    try:
+        use_log_scale = config["use_log_scale"]
+    except (KeyError, TypeError):
+        use_log_scale = True
+    try:
+        use_split = config["use_split"]
+    except (KeyError, TypeError):
+        use_split = "blind_chems"
+    if dataset == "GDSC1":
+        if all_genes:
+            n_genes = 17419
+            prepare_dataloaders_fn = prepare_dataloaders_allgenes
+        else:
+            n_genes = 2089
+            prepare_dataloaders_fn = prepare_dataloaders
+        
+        if corruption is not None:
+            prepare_dataloaders_fn = prepare_dataloaders_corrupted
+        if use_slopes:
+            data = pd.read_csv("data/data_slopes.csv", index_col=0)
+        elif use_log_scale:
+            data = pd.read_csv("data/ic50_processed_windex.csv")
+        else:
+            data = pd.read_csv("data/ic50_processed_nolog.csv")
+        if use_split == "blind_lines":
+            partition_col = "COSMIC_ID"
+        elif use_split == "blind_chems":
+            partition_col = "DRUG_NAME"
+    elif dataset == "PRISM":
+        n_genes = 2055
+        if use_log_scale:
+            data = pd.read_csv("data/prism_screening_processed.csv", index_col=0)
+        else:
+            raise NotImplementedError
+        if use_split == "blind_lines":
+            partition_col = "depmap_id"
+        elif use_split == "blind_chems":
+            partition_col = "name"
+        prepare_dataloaders_fn = prepare_dataloaders_prism
+    else:
+        raise NotImplementedError
+    if use_split in ["blind_lines", "blind_chems"]:
+        kf = KFoldGen(data, partition_col, k=k)
+    elif use_split == "lenient":
+        kf = KFoldLenient(data, partition_col, k=k)
+    else:
+        raise NotImplementedError
+    if config is not None:
+        config["n_genes"] = n_genes
+        learning_rate = config["learning_rate"]
+        betas =  (config["beta_1"], config["beta_2"])
+        weight_decay = config["weight_decay"]
+        train_batch = config["train_batch"]
+        for i in range(k):
+            train_dataloader, test_dataloader, val_dataloader = prepare_dataloaders_fn(train_batch = train_batch, no_val=no_val,**kf[i])
+            partitions[i] = {"model":get_model_without_tox(**config),
+                            "train_dataloader":train_dataloader,
+                            "test_dataloader":test_dataloader,
+                            "val_dataloader":val_dataloader}
+            partitions[i]["optimizer"] = torch.optim.Adam(partitions[i]["model"].parameters(),
+                                                          lr=learning_rate,
+                                                         betas = betas,
+                                                         weight_decay = weight_decay)
+            partitions[i]["model"].set_cold()
+            partitions[i]["scheduler"] = torch.optim.lr_scheduler.ExponentialLR(partitions[i]["optimizer"], gamma=config["lr_decay"])
+    else:
+        config = {}
+        config["n_genes"] = n_genes
+        for i in range(k):
+            train_dataloader, test_dataloader, val_dataloader = prepare_dataloaders_fn(no_val=no_val,**kf[i])
+            partitions[i] = {"model":get_model_without_tox(**config),
+                            "train_dataloader":train_dataloader,
+                            "test_dataloader":test_dataloader,
+                            "val_dataloader":val_dataloader}
+            partitions[i]["optimizer"] = torch.optim.Adam(partitions[i]["model"].parameters())
+            partitions[i]["scheduler"] = torch.optim.lr_scheduler.ExponentialLR(partitions[i]["optimizer"], gamma=0.99)
+    return partitions
 
 def prepare_cross_validation_P(config=None, dataset = "GDSC1", k=16, no_val = False, all_genes=False, use_slopes = False, corruption = None, **kwargs):
     partitions = {}
