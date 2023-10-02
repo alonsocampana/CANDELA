@@ -348,10 +348,26 @@ def get_pretrained_model(config={}):
     except KeyError:
         pass
     pretrained_GATF = GATF(**config_gatf)
+    pretrained_GATF.load_state_dict(torch.load("trained_models/GATR_pretrained.pth",  map_location=torch.device("cpu")))
     encoder = pretrained_GATF.gat_encoder
     model = GATmannP(encoder, **config)
     return model
 
+def get_pretrained1_model(config={}):
+    with open("params/optimal_config_GATF.json", "r") as f:
+        config_gatf = json.load(f)
+    with open("params/optimal_config_GATR.json", "r") as f:
+        config_gatr = json.load(f)
+    try:
+        config_gatf["p_dropout_gat"] = config["p_dropout_gat"]
+        config_gatr["p_dropout_attn"] = config["p_dropout_attn"]
+    except KeyError:
+        pass
+    pretrained_GATF = GATF(**config_gatf)
+    pretrained_GATF.load_state_dict(torch.load("trained_models/best_GATF.pth",  map_location=torch.device("cpu")))
+    encoder = pretrained_GATF.gat_encoder
+    model = GATmannP(encoder, **config)
+    return model
 
 def train_epoch(device, loss_fn, train_dataloader, model, optimizer, test_dataloader = None, val_dataloader = None, **kwargs):
     optimizer.zero_grad()
@@ -596,6 +612,76 @@ def prepare_cross_validation_P(config=None, dataset = "GDSC1", k=16, **kwargs):
         for i in range(k):
             train_dataloader, test_dataloader, val_dataloader = prepare_dataloaders_fn(**kf[i])
             partitions[i] = {"model":get_pretrained_model(config),
+                            "train_dataloader":train_dataloader,
+                            "test_dataloader":test_dataloader,
+                            "val_dataloader":val_dataloader}
+            partitions[i]["optimizer"] = torch.optim.Adam(partitions[i]["model"].parameters())
+            partitions[i]["scheduler"] = torch.optim.lr_scheduler.ExponentialLR(partitions[i]["optimizer"], gamma=0.99)
+    return partitions
+
+def prepare_cross_validation_P1(config=None, dataset = "GDSC1", k=16, **kwargs):
+    partitions = {}
+    try:
+        use_log_scale = config["use_log_scale"]
+    except (KeyError, TypeError):
+        use_log_scale = True
+    try:
+        use_split = config["use_split"]
+    except (KeyError, TypeError):
+        use_split = "blind_lines"
+    if dataset == "GDSC1":
+        n_genes = 2089
+        if use_log_scale:
+            data = pd.read_csv("data/ic50_processed_windex.csv")
+        else:
+            data = pd.read_csv("data/ic50_processed_nolog.csv")
+        if use_split == "blind_lines":
+            partition_col = "COSMIC_ID"
+        elif use_split == "blind_chems":
+            partition_col = "DRUG_NAME"
+        prepare_dataloaders_fn = prepare_dataloaders
+    elif dataset == "PRISM":
+        n_genes = 2055
+        if use_log_scale:
+            data = pd.read_csv("data/prism_screening_processed.csv", index_col=0)
+        else:
+            raise NotImplementedError
+        if use_split == "blind_lines":
+            partition_col = "depmap_id"
+        elif use_split == "blind_chems":
+            partition_col = "name"
+        prepare_dataloaders_fn = prepare_dataloaders_prism
+    else:
+        raise NotImplementedError
+    if use_split in ["blind_lines", "blind_chems"]:
+        kf = KFoldGen(data, partition_col, k=k)
+    elif use_split == "lenient":
+        kf = KFoldLenient(data, partition_col, k=k)
+    else:
+        raise NotImplementedError
+    if config is not None:
+        config["n_genes"] = n_genes
+        learning_rate = config["learning_rate"]
+        betas =  (config["beta_1"], config["beta_2"])
+        weight_decay = config["weight_decay"]
+        train_batch = config["train_batch"]
+        for i in range(k):
+            train_dataloader, test_dataloader, val_dataloader = prepare_dataloaders_fn(train_batch = train_batch, **kf[i])
+            partitions[i] = {"model":get_pretrained1_model(config),
+                            "train_dataloader":train_dataloader,
+                            "test_dataloader":test_dataloader,
+                            "val_dataloader":val_dataloader}
+            partitions[i]["optimizer"] = torch.optim.Adam(partitions[i]["model"].parameters(),
+                                                          lr=learning_rate,
+                                                         betas = betas,
+                                                         weight_decay = weight_decay)
+            partitions[i]["scheduler"] = torch.optim.lr_scheduler.ExponentialLR(partitions[i]["optimizer"], gamma=0.99)
+    else:
+        config = {}
+        config["n_genes"] = n_genes
+        for i in range(k):
+            train_dataloader, test_dataloader, val_dataloader = prepare_dataloaders_fn(**kf[i])
+            partitions[i] = {"model":get_pretrained1_model(config),
                             "train_dataloader":train_dataloader,
                             "test_dataloader":test_dataloader,
                             "val_dataloader":val_dataloader}
