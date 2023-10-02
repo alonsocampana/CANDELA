@@ -20,16 +20,18 @@ from GAMMA import predict
 
 def train_model(config, k=25):
     partitions = prepare_cross_validation(config, "GDSC1", k=k)
-    device = torch.device("cuda:2") if torch.cuda.is_available() else torch.device("cpu")
+    device = torch.device("cuda:3") if torch.cuda.is_available() else torch.device("cpu")
     preds = {}
+    if args.notox:
+        train_suffix = "no_tox"
     for i in range(k):
-        trained_partitions = torch.load(f"trained_models/{args.model}_{train_suffix}_{blind_suffix}_{args.k}.pkl")
+        trained_partitions = torch.load(f"trained_models/{args.model}_{config['train_suffix']}_{config['blind_suffix']}_{args.k}.pkl")
         partitions[i]["model"].load_state_dict(trained_partitions[i])
         partitions[i]["model"].to(device)
         gc.collect()
         preds[i] = predict(**partitions[i], device=device)
         partitions[i]["model"].to(torch.device("cpu"))
-    with open(f"predictions/{args.model}_{train_suffix}_{blind_suffix}_{args.k}.pkl", "wb") as f:
+    with open(f"predictions/{args.model}_{config['train_suffix']}_{config['blind_suffix']}_{args.k}.pkl", "wb") as f:
         pickle.dump(preds, f)
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PyTorch MNIST Example")
@@ -61,6 +63,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--noregularizer",
         action="store_true", help="Remove Regularization")
+    parser.add_argument(
+        "--notox",
+        action="store_true", help="Remove toxicity pretraining")
+    parser.add_argument(
+        "--concat", action="store_true", help="Replaces cross-attention by concatenation")
     
     args, _ = parser.parse_known_args()
     if args.blind == "lines":
@@ -76,23 +83,42 @@ if __name__ == "__main__":
     if args.model == "gamma":
         from GAMMA import train_epoch, test_epoch, eval_metrics, prepare_dataloaders, get_model
         if args.pretrained:
-            from GAMMA import prepare_cross_validation_P as prepare_cross_validation
+            if args.notox:
+                from GAMMA import prepare_cross_validation_P1 as prepare_cross_validation
+            elif args.concat:
+                from GAMMA import prepare_cross_validation_FS as prepare_cross_validation
+            else:
+                from GAMMA import prepare_cross_validation_P as prepare_cross_validation
         else:
             from GAMMA import prepare_cross_validation
         with open(f"params/best_params_GAMMA_{train_suffix}_{blind_suffix}_GDSC1.json", "r") as f:
             config = json.load(f)
+        if not args.notox:
+            train_suffix = "pretrained"
+        else:
+            train_suffix = "no_tox"
+        if args.concat:
+            train_suffix += "_concatenation"
         if args.noregularizer:
             config["l2_weight"] = 0.0
             train_suffix += "_noregularizer"
+        config["pooling"] = "gated"
     elif args.model == "gatmann":
         from GATmann import train_epoch, test_epoch, eval_metrics, prepare_dataloaders, get_model
         if args.pretrained:
-            from GATmann import prepare_cross_validation_P as prepare_cross_validation
+            if not args.notox:
+                from GATmann import prepare_cross_validation_P as prepare_cross_validation
+            else:
+                from GATmann import prepare_cross_validation_P1 as prepare_cross_validation
         else:
             from GATmann import prepare_cross_validation
         with open(f"params/best_params_GATMANN_{train_suffix}_{blind_suffix}_GDSC1.json", "r") as f:
             config = json.load(f)
             config["lr_decay"] = 0.99
+        if not args.notox:
+            train_suffix = "pretrained"
+        else:
+            train_suffix = "no_tox"
     elif args.model == "baseline":
         if args.pretrained:
             raise NotImplementedError
@@ -111,5 +137,7 @@ if __name__ == "__main__":
         config["eval_model"] = False
         config["train_length"] = 50
         config["lr_decay"] = 0.99
+    config["train_suffix"] = train_suffix
+    config["blind_suffix"] = blind_suffix
     train_model(config, k=args.k)
     gc.collect()
